@@ -1,0 +1,65 @@
+POLYMARKET_HOST = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
+BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+CHAIN_ID = 137
+
+ENTRY_WINDOW_SECONDS = 20
+RETRY_WINDOW_SECONDS = 10
+COMPOUND_RATIO = 0.30
+MIN_BET_USDC = 1.0
+
+MIN_ODDS = 0.88
+MAX_ODDS = 0.99
+
+# Dynamic entry profile
+ENTRY_START_SECONDS = 30
+ENTRY_CHECK_INTERVAL_SECONDS = 2
+ENTRY_CHECK_INTERVAL_FAST_SECONDS = 1
+ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS = 10
+# (seconds_left, min_odds, capital_pct)
+ENTRY_PROFILE_POINTS = [
+    (30, 0.95, 0.10),
+    (20, 0.88, 0.25),
+    (10, 0.85, 0.30),
+    (5, 0.80, 0.30),
+    (0, 0.80, 0.30),
+]
+FILL_SLIPPAGE_WARN_PCT = 0.03
+ENTRY_BALANCE_REFRESH_SECONDS = 15
+
+WAIT_LOG_INTERVAL_SECONDS = 60
+
+MARKET_DURATION_SECONDS = 300
+
+POLL_INTERVAL_SECONDS = 5
+POST_RESOLUTION_BUFFER_SECONDS = 15
+
+# Auto-redeem (claim) settings
+DATA_API = "https://data-api.polymarket.com"
+RELAYER_URL = "https://relayer-v2.polymarket.com"
+
+AUTO_REDEEM_ENABLED = True
+AUTO_REDEEM_MAX_CONDITIONS_PER_CYCLE = 3
+
+# Console feed verbosity: quiet | normal | debug
+LOG_LEVEL = "normal"
+AUTO_REDEEM_ERROR_LOG_COOLDOWN_SECONDS = 120
+
+# Stop-loss settings
+STOP_LOSS_ENABLED = True
+STOP_LOSS_PCT = 0.20
+STOP_LOSS_POLL_SECONDS = 2
+STOP_LOSS_CONFIRM_TICKS = 2
+STOP_LOSS_RETRY_SECONDS = 5
+
+
+cd "C:\ruta\BTC-Five-Minutes" 
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+python -m py_compile bot.py trader.py market.py config.py
+python bot.py
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1

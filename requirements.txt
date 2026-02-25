@@ -1,0 +1,5 @@
+py-clob-client
+py-builder-relayer-client
+python-dotenv
+requests
+colorama
