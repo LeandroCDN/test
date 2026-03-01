@@ -132,3 +132,18 @@ The architecture is designed for easy split deployment:
 - **Frontend**: deploy to Vercel, pointing `VITE_API_URL` to the server API
 
 No API contract changes needed — just update the base URL.
+
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+# terminal 1 (backend)
+uvicorn app.api.main:app --reload --port 8000
+
+# terminal 2 (frontend)
+cd web
+npm install
+# crear web/.env.local con:
+# VITE_API_URL=http://localhost:8000
+npm run dev
