@@ -12,7 +12,7 @@ MIN_ODDS = 0.88
 MAX_ODDS = 0.99
 
 # Dynamic entry profile
-ENTRY_START_SECONDS = 30
+ENTRY_START_SECONDS = 20
 ENTRY_CHECK_INTERVAL_SECONDS = 2
 ENTRY_CHECK_INTERVAL_FAST_SECONDS = 1
 ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS = 10
@@ -26,6 +26,7 @@ ENTRY_PROFILE_POINTS = [
 ]
 FILL_SLIPPAGE_WARN_PCT = 0.03
 ENTRY_BALANCE_REFRESH_SECONDS = 15
+ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT = True
 
 WAIT_LOG_INTERVAL_SECONDS = 60
 
@@ -40,6 +41,9 @@ RELAYER_URL = "https://relayer-v2.polymarket.com"
 
 AUTO_REDEEM_ENABLED = True
 AUTO_REDEEM_MAX_CONDITIONS_PER_CYCLE = 3
+AUTO_REDEEM_ATTEMPT_INTERVAL_SECONDS = 30
+AUTO_REDEEM_PROBE_INTERVAL_SECONDS = 30
+AUTO_REDEEM_RATE_LIMIT_BUFFER_SECONDS = 5
 
 # Console feed verbosity: quiet | normal | debug
 LOG_LEVEL = "normal"
@@ -53,13 +57,3 @@ STOP_LOSS_CONFIRM_TICKS = 2
 STOP_LOSS_RETRY_SECONDS = 5
 
 
-cd "C:\ruta\BTC-Five-Minutes" 
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-python -m py_compile bot.py trader.py market.py config.py
-python bot.py
-
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1

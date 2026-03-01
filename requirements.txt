@@ -3,3 +3,7 @@ py-builder-relayer-client
 python-dotenv
 requests
 colorama
+fastapi
+uvicorn[standard]
+pytest
+httpx

@@ -169,26 +169,157 @@ def get_token_prices_batch(client, token_ids, side="BUY"):
     return {}
 
 
+def _extract_order_id(response):
+    if not isinstance(response, dict):
+        return None
+    return response.get("orderID") or response.get("id") or response.get("orderId")
+
+
+def _is_fok_kill_error(exc):
+    msg = str(exc).lower()
+    return "fok" in msg and ("fully filled or killed" in msg or "couldn't be fully filled" in msg)
+
+
+def _is_request_exception(exc):
+    msg = str(exc).lower()
+    return "request exception" in msg or "timed out" in msg or "connection" in msg
+
+
+def _order_type_name(order_type):
+    return getattr(order_type, "name", str(order_type))
+
+
+def _supported_entry_order_types():
+    order_types = [OrderType.FOK]
+    for maybe in ("IOC",):
+        if hasattr(OrderType, maybe):
+            order_types.append(getattr(OrderType, maybe))
+    return order_types
+
+
+def _attempt_market_buy_with_type(client, token_id, amount, order_type):
+    market_order = MarketOrderArgs(
+        token_id=token_id,
+        amount=amount,
+        side=BUY,
+        order_type=order_type,
+    )
+    signed_order = client.create_market_order(market_order)
+    response = client.post_order(signed_order, order_type)
+    return response
+
+
+def _execute_with_retries(client, token_id, amount, order_type):
+    """
+    Try to submit one order quickly with micro retries.
+    Returns tuple: (response_or_none, last_exception_or_none)
+    """
+    # Keep retries very short to preserve entry speed.
+    delays = [0.0, 0.08, 0.15]
+    last_exc = None
+    for i, delay in enumerate(delays, start=1):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            response = _attempt_market_buy_with_type(client, token_id, amount, order_type)
+            print(
+                f"[TRADER] Entry attempt {i}/{len(delays)} {_order_type_name(order_type)} OK "
+                f"amount=${amount:.2f} ({_short_order_response(response)})"
+            )
+            return response, None
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[TRADER] Entry attempt {i}/{len(delays)} {_order_type_name(order_type)} failed "
+                f"amount=${amount:.2f} | {e}"
+            )
+            # For technical request exceptions, keep fast retries in this burst.
+            # For FOK-kill type errors, retries are still useful because book changes quickly.
+            continue
+    return None, last_exc
+
+
 def place_bet(client, token_id, amount, dry_run=False):
-    """Place a market buy order (Fill-or-Kill). amount is in USDC dollars."""
+    """
+    Aggressive entry execution.
+
+    Policy:
+      1) Try full amount with FOK (+micro retries)
+      2) Fallback to IOC if available (+micro retries)
+      3) If still no fill, slice in 50/50 and retry per slice
+
+    Returns a dict response on any successful fill, or None.
+    """
     if dry_run:
         print(f"[DRY RUN] Would buy ${amount:.2f} of token {token_id[:16]}...")
         return {"dry_run": True, "amount": amount, "token_id": token_id}
 
-    try:
-        market_order = MarketOrderArgs(
-            token_id=token_id,
-            amount=amount,
-            side=BUY,
-            order_type=OrderType.FOK,
-        )
-        signed_order = client.create_market_order(market_order)
-        response = client.post_order(signed_order, OrderType.FOK)
-        print(f"[TRADER] Order placed ({_short_order_response(response)})")
-        return response
-    except Exception as e:
-        print(f"[TRADER] Order failed: {e}")
+    order_types = _supported_entry_order_types()
+    # Slice policy requested: 50% / 50%
+    first_half = round(amount * 0.5, 2)
+    second_half = round(amount - first_half, 2)
+    slices = [amount]
+    if first_half > 0 and second_half > 0:
+        slices.extend([first_half, second_half])
+
+    successful = []
+    successful_amount = 0.0
+    last_exc = None
+
+    for slice_idx, slice_amount in enumerate(slices, start=1):
+        print(f"[TRADER] Entry execution slice {slice_idx}/{len(slices)} amount=${slice_amount:.2f}")
+        placed_this_slice = False
+        for order_type in order_types:
+            response, exc = _execute_with_retries(client, token_id, slice_amount, order_type)
+            if response is not None:
+                successful.append(response)
+                successful_amount += slice_amount
+                placed_this_slice = True
+                # If the full amount fills, stop immediately.
+                if slice_idx == 1:
+                    out = dict(response) if isinstance(response, dict) else {"status": "ok"}
+                    out["_effective_amount"] = round(successful_amount, 2)
+                    out["_attempted_amount"] = round(amount, 2)
+                    return out
+                # For split mode, continue to try the remaining slice(s).
+                break
+            last_exc = exc
+            if exc is not None and _is_request_exception(exc):
+                # Request exceptions are technical; continue aggressively.
+                continue
+            if exc is not None and _is_fok_kill_error(exc):
+                # Liquidity issue; try next order type quickly.
+                continue
+        if not placed_this_slice:
+            print(
+                f"[TRADER] Slice {slice_idx}/{len(slices)} failed completely "
+                f"amount=${slice_amount:.2f}"
+            )
+
+    if not successful:
+        if last_exc is not None:
+            print(f"[TRADER] Order failed: {last_exc}")
+        else:
+            print("[TRADER] Order failed: no successful execution path")
         return None
+
+    order_ids = []
+    for r in successful:
+        oid = _extract_order_id(r)
+        if oid:
+            order_ids.append(str(oid))
+    result = {
+        "status": "matched_multi" if len(successful) > 1 else "matched",
+        "order_ids": order_ids,
+        "orderID": order_ids[0] if order_ids else None,
+        "_effective_amount": round(successful_amount, 2),
+        "_attempted_amount": round(amount, 2),
+    }
+    print(
+        f"[TRADER] Entry partial/combined fill: filled=${successful_amount:.2f} "
+        f"attempted=${amount:.2f} orders={len(order_ids)}"
+    )
+    return result
 
 
 def sell_shares(client, token_id, shares, dry_run=False):
@@ -231,12 +362,19 @@ def get_entry_fill_details(client, order_response, token_id, fallback_price, fal
             "source": "fallback",
         }
 
-    order_id = (
+    order_ids = []
+    if isinstance(order_response.get("order_ids"), list):
+        order_ids = [str(x).lower() for x in order_response.get("order_ids") if x]
+    single_order_id = (
         order_response.get("orderID")
         or order_response.get("id")
         or order_response.get("orderId")
     )
-    if not order_id:
+    if single_order_id:
+        order_ids.append(str(single_order_id).lower())
+    order_ids = list(dict.fromkeys(order_ids))
+
+    if not order_ids:
         return {
             "entry_price": fallback_price,
             "shares": fallback_shares,
@@ -257,7 +395,7 @@ def get_entry_fill_details(client, order_response, token_id, fallback_price, fal
 
     matched = []
     for t in trades or []:
-        if str(t.get("taker_order_id", "")).lower() != str(order_id).lower():
+        if str(t.get("taker_order_id", "")).lower() not in order_ids:
             continue
         if str(t.get("side", "")).upper() != "BUY":
             continue
@@ -387,6 +525,18 @@ class AutoRedeemer:
             "pending": pending,
             "errors": errors,
         }
+
+    def peek_redeemable_conditions(self, limit=50):
+        """
+        Lightweight check for pending redeemables (no relayer execution).
+        Returns a list of condition ids.
+        """
+        if not self.enabled or not self.wallet_address:
+            return []
+        conditions = self._get_redeemable_conditions()
+        if limit is None:
+            return conditions
+        return conditions[: max(0, int(limit))]
 
     def _get_redeemable_conditions(self):
         try:

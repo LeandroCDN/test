@@ -1,11 +1,10 @@
 """
 Quick validation script - tests market discovery and price fetching
 without needing a Polymarket account or private key.
-Run: python test_market.py
+Run: python test/test_market.py
 """
 from datetime import datetime, timezone
 from market import find_active_btc_5m_market
-from strategy import get_btc_price, decide_side
 
 
 def main():
@@ -13,17 +12,8 @@ def main():
     print("BTC 5-Min Bot - Component Test")
     print("=" * 60)
 
-    # Test 1: BTC price from Binance
-    print("\n[TEST 1] Fetching BTC price from Binance...")
-    price = get_btc_price()
-    if price:
-        print(f"  OK - BTC/USDT: ${price:,.2f}")
-    else:
-        print("  FAIL - Could not fetch BTC price")
-        return
-
-    # Test 2: Find active market
-    print("\n[TEST 2] Searching for active BTC 5-min market...")
+    # Test 1: Find active market
+    print("\n[TEST 1] Searching for active BTC 5-min market...")
     market = find_active_btc_5m_market()
     if market:
         print(f"  OK - Found market:")
@@ -40,20 +30,29 @@ def main():
         print("  WARN - No active market found (may be between windows)")
         print("  This is normal if no 5-min window is currently open.")
 
-    # Test 3: Decision logic
-    print("\n[TEST 3] Testing decision logic...")
-    opening = 95000.0
-    current_up = 95050.0
-    current_down = 94950.0
+    # Test 2: Entry strategy helpers
+    print("\n[TEST 2] Testing entry strategy helpers...")
+    from app.services.entry_strategy import (
+        evaluate_candidate_market,
+        pick_best_candidate,
+        get_dynamic_entry_params,
+    )
 
-    side_up = decide_side(current_up, opening)
-    side_down = decide_side(current_down, opening)
-    side_equal = decide_side(opening, opening)
+    params_30s = get_dynamic_entry_params(30.0)
+    params_5s = get_dynamic_entry_params(5.0)
+    assert params_30s["min_odds"] >= params_5s["min_odds"], "min_odds should decrease over time"
+    print(f"  OK - @30s: min_odds={params_30s['min_odds']:.3f} cap={params_30s['capital_pct']:.0%}")
+    print(f"  OK -  @5s: min_odds={params_5s['min_odds']:.3f} cap={params_5s['capital_pct']:.0%}")
 
-    assert side_up == "up", f"Expected 'up', got '{side_up}'"
-    assert side_down == "down", f"Expected 'down', got '{side_down}'"
-    assert side_equal == "up", f"Expected 'up' for equal, got '{side_equal}'"
-    print("  OK - All decision logic tests passed")
+    mock_market = {"up_token": "tok_up", "down_token": "tok_dn", "asset": "btc"}
+    prices = {"tok_up": 0.90, "tok_dn": 0.10}
+    cand = evaluate_candidate_market(mock_market, prices, min_odds=0.85)
+    assert cand is not None and cand["side"] == "up" and cand["accepted"]
+    print("  OK - evaluate_candidate_market works")
+
+    best = pick_best_candidate([cand])
+    assert best is not None and best["asset"] == "btc"
+    print("  OK - pick_best_candidate works")
 
     print("\n" + "=" * 60)
     print("All component tests passed!")
