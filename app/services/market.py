@@ -20,6 +20,11 @@ def find_active_eth_5m_market():
     return find_active_crypto_5m_market("eth")
 
 
+def find_active_sol_5m_market():
+    """Convenience wrapper for SOL 5m market discovery."""
+    return find_active_crypto_5m_market("sol")
+
+
 def find_active_crypto_5m_market(asset):
     """
     Finds the active crypto Up/Down 5-minute market closest to closing.
@@ -27,9 +32,10 @@ def find_active_crypto_5m_market(asset):
     Supported assets:
       - "btc"
       - "eth"
+      - "sol"
     """
     asset = (asset or "").strip().lower()
-    if asset not in {"btc", "eth"}:
+    if asset not in {"btc", "eth", "sol"}:
         raise ValueError(f"Unsupported asset for 5m market: {asset}")
 
     now = datetime.now(timezone.utc)

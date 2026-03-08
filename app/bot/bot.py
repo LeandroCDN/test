@@ -23,6 +23,10 @@ from config import (
     ENTRY_CHECK_INTERVAL_SECONDS,
     ENTRY_CHECK_INTERVAL_FAST_SECONDS,
     ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS,
+    ENTRY_LIMIT_FLOATING_ENABLED,
+    ENTRY_LIMIT_PHASE_RATIO,
+    ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS,
+    ENTRY_LIMIT_MAX_REPRICES,
     ENTRY_BALANCE_REFRESH_SECONDS,
     MIN_BET_USDC,
     POLL_INTERVAL_SECONDS,
@@ -39,6 +43,18 @@ from config import (
     STOP_LOSS_RETRY_SECONDS,
     FILL_SLIPPAGE_WARN_PCT,
     ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT,
+    VOLATILITY_FILTER_ENABLED,
+    VOLATILITY_REFRESH_SECONDS,
+    VOLATILITY_INTERVAL,
+    VOLATILITY_LOOKBACK_CANDLES,
+    VOLATILITY_LOW_THRESHOLD,
+    VOLATILITY_HIGH_THRESHOLD,
+    VOLATILITY_EXTREME_THRESHOLD,
+    VOLATILITY_MIN_ODDS_BUMP_HIGH,
+    VOLATILITY_MIN_ODDS_BUMP_EXTREME,
+    VOLATILITY_CAPITAL_MULT_LOW,
+    VOLATILITY_CAPITAL_MULT_HIGH,
+    VOLATILITY_CAPITAL_MULT_EXTREME,
 )
 from market import find_active_crypto_5m_market
 from trader import (
@@ -56,6 +72,7 @@ from app.services.entry_strategy import (
     pick_best_candidate,
     get_dynamic_entry_params,
 )
+from app.services.volatility import fetch_candles, build_snapshot_from_candles, resolve_regime
 
 colorama_init()
 
@@ -89,12 +106,6 @@ def new_stats():
         "total_entries": 0,
         "total_btc_entries": 0,
         "total_eth_entries": 0,
-        "total_wins": 0,
-        "total_losses": 0,
-        "total_stop_exits": 0,
-        "total_stop_wins": 0,
-        "total_stop_losses": 0,
-        "total_skipped": 0,
         "total_pnl": 0.0,
         "start_balance": 0.0,
         "start_time": datetime.now(),
@@ -208,7 +219,6 @@ def _run_single_round(client, dry_run, stats, auto_redeemer):
     # dynamic entry
     entry = _attempt_dynamic_entry(client, markets, auto_redeemer, dry_run=dry_run)
     if entry is None:
-        stats["total_skipped"] += 1
         log(f"{YELLOW}SKIP:{RESET} No entry in dynamic window (BTC/ETH)")
         _wait_for_resolution(markets, auto_redeemer)
         print()
@@ -276,24 +286,15 @@ def _run_single_round(client, dry_run, stats, auto_redeemer):
     if dry_run:
         log(f"{DIM}DRY RUN — round complete{RESET} | Balance: ${new_balance:.2f}")
     elif stop_info.get("triggered"):
-        stats["total_stop_exits"] += 1
         stats["total_pnl"] += pnl
         color = GREEN if pnl > 0 else RED
         tag = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "EVEN")
-        if pnl > 0:
-            stats["total_wins"] += 1
-            stats["total_stop_wins"] += 1
-        elif pnl < 0:
-            stats["total_losses"] += 1
-            stats["total_stop_losses"] += 1
         log(f"{color}{BRIGHT}{tag} (STOP){RESET}  PnL: {color}{'+'if pnl>=0 else ''}${pnl:.2f}{RESET} | Balance: ${new_balance:.2f}")
     elif pnl > 0:
         stats["total_pnl"] += pnl
-        stats["total_wins"] += 1
         log(f"{GREEN}{BRIGHT}WIN{RESET}  PnL: {GREEN}+${pnl:.2f}{RESET} | Balance: ${new_balance:.2f}")
     elif pnl < 0 and pnl > -bet_amount * 0.98:
         stats["total_pnl"] += pnl
-        stats["total_losses"] += 1
         log(f"{RED}{BRIGHT}LOSS{RESET} PnL: {RED}-${abs(pnl):.2f}{RESET} | Balance: ${new_balance:.2f}")
     else:
         log(
@@ -306,10 +307,47 @@ def _run_single_round(client, dry_run, stats, auto_redeemer):
 # ── dynamic entry ─────────────────────────────────────────────────
 
 
+def _get_btc_vol_snapshot(cache):
+    now_ts = time.time()
+    if (
+        cache.get("snapshot") is not None
+        and (now_ts - cache.get("ts", 0.0)) < VOLATILITY_REFRESH_SECONDS
+    ):
+        return cache["snapshot"]
+    candles = fetch_candles(
+        "btc",
+        interval=VOLATILITY_INTERVAL,
+        limit=max(3, int(VOLATILITY_LOOKBACK_CANDLES)),
+    )
+    snapshot = build_snapshot_from_candles(candles)
+    cache["snapshot"] = snapshot
+    cache["ts"] = now_ts
+    return snapshot
+
+
+def _apply_volatility_profile(min_odds, capital_pct, snapshot):
+    if not VOLATILITY_FILTER_ENABLED or not snapshot:
+        return min_odds, capital_pct, "off"
+    regime = resolve_regime(
+        snapshot["score"],
+        low_th=VOLATILITY_LOW_THRESHOLD,
+        high_th=VOLATILITY_HIGH_THRESHOLD,
+        extreme_th=VOLATILITY_EXTREME_THRESHOLD,
+    )
+    if regime == "low":
+        return max(0.01, min_odds - 0.005), min(1.0, capital_pct * VOLATILITY_CAPITAL_MULT_LOW), regime
+    if regime == "high":
+        return min(0.999, min_odds + VOLATILITY_MIN_ODDS_BUMP_HIGH), capital_pct * VOLATILITY_CAPITAL_MULT_HIGH, regime
+    if regime == "extreme":
+        return min(0.999, min_odds + VOLATILITY_MIN_ODDS_BUMP_EXTREME), capital_pct * VOLATILITY_CAPITAL_MULT_EXTREME, regime
+    return min_odds, capital_pct, regime
+
+
 def _attempt_dynamic_entry(client, markets, auto_redeemer, dry_run=False):
     balance_snapshot = None
     balance_snapshot_ts = 0.0
     blocked_market_slugs = set()
+    vol_cache = {"snapshot": None, "ts": 0.0}
 
     while True:
         now = datetime.now(timezone.utc)
@@ -320,6 +358,8 @@ def _attempt_dynamic_entry(client, markets, auto_redeemer, dry_run=False):
         params = get_dynamic_entry_params(seconds_left)
         min_odds = params["min_odds"]
         capital_pct = params["capital_pct"]
+        vol_snapshot = _get_btc_vol_snapshot(vol_cache)
+        min_odds, capital_pct, vol_regime = _apply_volatility_profile(min_odds, capital_pct, vol_snapshot)
 
         token_ids = []
         for m in markets.values():
@@ -363,10 +403,22 @@ def _attempt_dynamic_entry(client, markets, auto_redeemer, dry_run=False):
                 return None
 
             log(
-                f"Entry signal [{seconds_left:.0f}s] {chosen['asset'].upper()}: {chosen['side'].upper()} odds={chosen['buy_price']:.3f} min={min_odds:.3f} | Bet ${bet_amount:.2f} ({capital_pct:.0%})",
+                f"Entry signal [{seconds_left:.0f}s] {chosen['asset'].upper()}: {chosen['side'].upper()} odds={chosen['buy_price']:.3f} min={min_odds:.3f} | Bet ${bet_amount:.2f} ({capital_pct:.0%}) vol={vol_regime}",
                 CYAN,
             )
-            order_response = place_bet(client, chosen["token_id"], bet_amount, dry_run=dry_run)
+            market_phase_start_s = ENTRY_START_SECONDS * (1.0 - ENTRY_LIMIT_PHASE_RATIO)
+            use_limit = ENTRY_LIMIT_FLOATING_ENABLED and seconds_left > market_phase_start_s
+            execution_mode = "limit" if use_limit else "market"
+            order_response = place_bet(
+                client,
+                chosen["token_id"],
+                bet_amount,
+                dry_run=dry_run,
+                execution_mode=execution_mode,
+                limit_max_price=min(MAX_ODDS, chosen["buy_price"]),
+                limit_reprice_interval_seconds=ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS,
+                limit_max_reprices=ENTRY_LIMIT_MAX_REPRICES,
+            )
             if order_response is not None:
                 effective_amount = bet_amount
                 if isinstance(order_response, dict):
@@ -381,6 +433,7 @@ def _attempt_dynamic_entry(client, markets, auto_redeemer, dry_run=False):
                     "min_odds_at_entry": min_odds,
                     "capital_pct_at_entry": capital_pct,
                     "seconds_left_at_entry": seconds_left,
+                    "execution_mode": execution_mode,
                     "order_response": order_response,
                 }
             log("Order failed, continuing dynamic retries...", YELLOW, level="debug")
@@ -493,7 +546,6 @@ def _print_session_summary(stats, client):
     hours = duration.total_seconds() / 3600
     minutes = duration.total_seconds() / 60
     entries = stats["total_entries"]
-    win_rate = (stats["total_wins"] / entries * 100) if entries > 0 else 0
 
     current_balance = get_balance(client)
     session_pnl = current_balance - stats["start_balance"]
@@ -508,15 +560,6 @@ def _print_session_summary(stats, client):
     log(f"  Entries:      {entries} bets placed")
     log(f"    BTC entries:{stats['total_btc_entries']}")
     log(f"    ETH entries:{stats['total_eth_entries']}")
-    log(f"  Skipped:      {stats['total_skipped']}")
-    log(f"  Stop exits:   {stats['total_stop_exits']}")
-    if entries > 0:
-        log(f"  Wins:         {GREEN}{stats['total_wins']}{RESET}")
-        log(f"  Losses:       {RED}{stats['total_losses']}{RESET}")
-        log(f"  Win rate:     {BRIGHT}{win_rate:.1f}%{RESET}")
-        if stats["total_stop_exits"] > 0:
-            log(f"  Stop wins:    {GREEN}{stats['total_stop_wins']}{RESET}")
-            log(f"  Stop losses:  {RED}{stats['total_stop_losses']}{RESET}")
     pnl_color = GREEN if session_pnl >= 0 else RED
     log(f"  Start:        ${stats['start_balance']:.2f}")
     log(f"  Current:      ${current_balance:.2f}")

@@ -1,0 +1,1 @@
+"""Second isolated Polymarket bot."""

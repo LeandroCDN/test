@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api } from "./api";
-import type { StatusSnapshot, BotEvent } from "./api";
+import type { BotApi, StatusSnapshot, BotEvent } from "./api";
 
-export function useStatus(intervalMs = 1000) {
+export function useStatus(api: BotApi, intervalMs = 1000) {
   const [status, setStatus] = useState<StatusSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,12 +24,12 @@ export function useStatus(intervalMs = 1000) {
       active = false;
       clearInterval(id);
     };
-  }, [intervalMs]);
+  }, [api, intervalMs]);
 
   return { status, error };
 }
 
-export function useEvents(intervalMs = 2000) {
+export function useEvents(api: BotApi, intervalMs = 2000) {
   const [events, setEvents] = useState<BotEvent[]>([]);
   const lastIdRef = useRef<string | undefined>(undefined);
 
@@ -65,7 +64,7 @@ export function useEvents(intervalMs = 2000) {
       active = false;
       clearInterval(id);
     };
-  }, [intervalMs]);
+  }, [api, intervalMs]);
 
   const clearEvents = useCallback(() => {
     setEvents((prev) => {

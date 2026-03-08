@@ -1,0 +1,99 @@
+{
+  "enabled_assets": [
+    "btc",
+    "eth",
+    "sol"
+  ],
+  "entry_start_seconds": 38,
+  "entry_check_interval_seconds": 1.0,
+  "entry_check_interval_fast_seconds": 0.5,
+  "entry_check_interval_fast_threshold_seconds": 12,
+  "entry_limit_floating_enabled": true,
+  "entry_limit_phase_ratio": 0.65,
+  "entry_limit_reprice_interval_seconds": 0.5,
+  "entry_limit_max_reprices": 2,
+  "entry_balance_refresh_seconds": 10,
+  "entry_profile_points": [
+    [
+      30.0,
+      0.1,
+      0.06
+    ],
+    [
+      25.0,
+      0.09,
+      0.07
+    ],
+    [
+      20.0,
+      0.05,
+      0.08
+    ],
+    [
+      15.0,
+      0.05,
+      0.09
+    ],
+    [
+      12.0,
+      0.05,
+      0.1
+    ],
+    [
+      9.0,
+      0.05,
+      0.11
+    ],
+    [
+      6.0,
+      0.04,
+      0.12
+    ],
+    [
+      3.0,
+      0.03,
+      0.12
+    ],
+    [
+      0.0,
+      0.02,
+      0.12
+    ]
+  ],
+  "min_bet_usdc": 1.0,
+  "bet_sizing_mode": "fixed",
+  "max_odds": 0.97,
+  "fill_slippage_warn_pct": 0.02,
+  "poll_interval_seconds": 3,
+  "post_resolution_buffer_seconds": 10,
+  "wait_log_interval_seconds": 30,
+  "auto_redeem_enabled": true,
+  "auto_redeem_max_conditions_per_cycle": 3,
+  "auto_redeem_attempt_interval_seconds": 30,
+  "auto_redeem_probe_interval_seconds": 30,
+  "auto_redeem_rate_limit_buffer_seconds": 5,
+  "stop_loss_enabled": false,
+  "stop_loss_pct": 0.18,
+  "stop_loss_poll_seconds": 1,
+  "stop_loss_confirm_ticks": 2,
+  "stop_loss_retry_seconds": 3,
+  "volatility_filter_enabled": true,
+  "volatility_refresh_seconds": 10,
+  "volatility_interval": "1m",
+  "volatility_lookback_candles": 20,
+  "volatility_low_threshold": 0.0018,
+  "volatility_high_threshold": 0.004,
+  "volatility_extreme_threshold": 0.0065,
+  "volatility_min_odds_bump_high": 0.006,
+  "volatility_min_odds_bump_extreme": 0.012,
+  "volatility_capital_mult_low": 1.1,
+  "volatility_capital_mult_high": 0.75,
+  "volatility_capital_mult_extreme": 0.45,
+  "fair_value_sigma_floor_pct": 0.0008,
+  "fair_value_no_trade_band_pct": 0.00015,
+  "fair_value_max_spread": 0.06,
+  "fair_value_requote_threshold": 0.015,
+  "fair_value_aggressive_edge": 0.045,
+  "fair_value_min_model_probability": 0.5,
+  "fair_value_min_market_probability": 0.47
+}

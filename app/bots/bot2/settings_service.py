@@ -1,23 +1,22 @@
+from __future__ import annotations
+
 import json
 import os
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from app import config as cfg
-
+from app.bots.bot2 import config as cfg
 
 SETTINGS_FILE = os.getenv(
-    "BOT_SETTINGS_FILE",
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "runtime_settings.json"),
+    "BOT2_SETTINGS_FILE",
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir, "runtime_settings_bot2.json"),
 )
 SETTINGS_FILE = os.path.normpath(SETTINGS_FILE)
 
-SUPPORTED_ASSETS = {"btc", "eth"}
 
-
-class AppSettings(BaseModel):
-    enabled_assets: list[str] = Field(default_factory=lambda: ["btc", "eth"])
+class Bot2Settings(BaseModel):
+    enabled_assets: list[str] = Field(default_factory=lambda: list(cfg.ENABLED_ASSETS))
 
     entry_start_seconds: int = cfg.ENTRY_START_SECONDS
     entry_check_interval_seconds: float = cfg.ENTRY_CHECK_INTERVAL_SECONDS
@@ -33,9 +32,9 @@ class AppSettings(BaseModel):
     )
 
     min_bet_usdc: float = cfg.MIN_BET_USDC
+    bet_sizing_mode: str = cfg.BET_SIZING_MODE
     max_odds: float = cfg.MAX_ODDS
     fill_slippage_warn_pct: float = cfg.FILL_SLIPPAGE_WARN_PCT
-    entry_lock_market_on_high_odds_reject: bool = cfg.ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT
 
     poll_interval_seconds: int = cfg.POLL_INTERVAL_SECONDS
     post_resolution_buffer_seconds: int = cfg.POST_RESOLUTION_BUFFER_SECONDS
@@ -66,49 +65,61 @@ class AppSettings(BaseModel):
     volatility_capital_mult_high: float = cfg.VOLATILITY_CAPITAL_MULT_HIGH
     volatility_capital_mult_extreme: float = cfg.VOLATILITY_CAPITAL_MULT_EXTREME
 
+    fair_value_sigma_floor_pct: float = cfg.FAIR_VALUE_SIGMA_FLOOR_PCT
+    fair_value_no_trade_band_pct: float = cfg.FAIR_VALUE_NO_TRADE_BAND_PCT
+    fair_value_max_spread: float = cfg.FAIR_VALUE_MAX_SPREAD
+    fair_value_requote_threshold: float = cfg.FAIR_VALUE_REQUOTE_THRESHOLD
+    fair_value_aggressive_edge: float = cfg.FAIR_VALUE_AGGRESSIVE_EDGE
+    fair_value_min_model_probability: float = cfg.FAIR_VALUE_MIN_MODEL_PROBABILITY
+    fair_value_min_market_probability: float = cfg.FAIR_VALUE_MIN_MARKET_PROBABILITY
+
     @field_validator("enabled_assets")
     @classmethod
     def _validate_assets(cls, values: list[str]) -> list[str]:
-        cleaned = []
-        for v in values:
-            s = str(v).strip().lower()
-            if s:
-                cleaned.append(s)
-        cleaned = sorted(set(cleaned))
+        cleaned = sorted({str(v).strip().lower() for v in values if str(v).strip()})
+        allowed = {"btc", "eth", "sol"}
+        invalid = [asset for asset in cleaned if asset not in allowed]
+        if invalid:
+            raise ValueError(f"Unsupported bot 2 assets: {', '.join(invalid)}")
         if not cleaned:
-            raise ValueError("At least one asset must be enabled")
-        unsupported = [a for a in cleaned if a not in SUPPORTED_ASSETS]
-        if unsupported:
-            raise ValueError(f"Unsupported assets: {', '.join(unsupported)}")
+            raise ValueError("enabled_assets cannot be empty")
         return cleaned
+
+    @field_validator("bet_sizing_mode")
+    @classmethod
+    def _validate_bet_sizing_mode(cls, value: str) -> str:
+        mode = str(value).strip().lower()
+        if mode not in {"dynamic", "fixed"}:
+            raise ValueError("bet_sizing_mode must be 'dynamic' or 'fixed'")
+        return mode
 
     @field_validator("entry_profile_points")
     @classmethod
     def _validate_profile_points(cls, points: list[list[float]]) -> list[list[float]]:
         if not points:
             raise ValueError("entry_profile_points cannot be empty")
-        norm: list[list[float]] = []
-        for p in points:
-            if len(p) != 3:
-                raise ValueError("Each profile point must be [seconds_left, min_odds, capital_pct]")
-            sec, odds, cap = float(p[0]), float(p[1]), float(p[2])
+        normalized: list[list[float]] = []
+        for point in points:
+            if len(point) != 3:
+                raise ValueError("Each profile point must be [seconds_left, min_edge, capital_pct]")
+            sec, edge, capital = float(point[0]), float(point[1]), float(point[2])
             if sec < 0:
                 raise ValueError("seconds_left must be >= 0")
-            if not (0 < odds < 1):
-                raise ValueError("min_odds must be between 0 and 1")
-            if not (0 < cap <= 1):
+            if edge <= 0 or edge >= 1:
+                raise ValueError("min_edge must be between 0 and 1")
+            if capital <= 0 or capital > 1:
                 raise ValueError("capital_pct must be between 0 and 1")
-            norm.append([sec, odds, cap])
-        norm.sort(key=lambda x: x[0], reverse=True)
-        return norm
+            normalized.append([sec, edge, capital])
+        normalized.sort(key=lambda item: item[0], reverse=True)
+        return normalized
 
     @field_validator("entry_limit_phase_ratio")
     @classmethod
-    def _validate_entry_limit_phase_ratio(cls, value: float) -> float:
-        v = float(value)
-        if not (0 < v < 1):
+    def _validate_phase_ratio(cls, value: float) -> float:
+        value = float(value)
+        if not (0 < value < 1):
             raise ValueError("entry_limit_phase_ratio must be between 0 and 1")
-        return v
+        return value
 
     @field_validator(
         "volatility_low_threshold",
@@ -116,13 +127,33 @@ class AppSettings(BaseModel):
         "volatility_extreme_threshold",
         "volatility_min_odds_bump_high",
         "volatility_min_odds_bump_extreme",
+        "fair_value_sigma_floor_pct",
+        "fair_value_no_trade_band_pct",
+        "fair_value_max_spread",
+        "fair_value_requote_threshold",
+        "fair_value_aggressive_edge",
     )
     @classmethod
     def _validate_non_negative(cls, value: float) -> float:
-        v = float(value)
-        if v < 0:
-            raise ValueError("Volatility thresholds/bumps must be >= 0")
-        return v
+        value = float(value)
+        if value < 0:
+            raise ValueError("Value must be >= 0")
+        return value
+
+    @field_validator("fair_value_min_model_probability", "fair_value_min_market_probability")
+    @classmethod
+    def _validate_probability_threshold(cls, value: float) -> float:
+        value = float(value)
+        if value < 0:
+            raise ValueError("Probability threshold must be >= 0")
+        if value > 1:
+            if value <= 100:
+                value = value / 100.0
+            else:
+                raise ValueError("Probability threshold must be between 0 and 1, or 0 and 100")
+        if value > 1:
+            raise ValueError("Probability threshold must be between 0 and 1")
+        return value
 
     @field_validator(
         "volatility_capital_mult_low",
@@ -130,39 +161,44 @@ class AppSettings(BaseModel):
         "volatility_capital_mult_extreme",
     )
     @classmethod
-    def _validate_positive_mult(cls, value: float) -> float:
-        v = float(value)
-        if v <= 0:
-            raise ValueError("Volatility capital multipliers must be > 0")
-        return v
+    def _validate_positive_multiplier(cls, value: float) -> float:
+        value = float(value)
+        if value <= 0:
+            raise ValueError("Multiplier must be > 0")
+        return value
 
 
 def _defaults() -> dict[str, Any]:
-    return AppSettings().model_dump()
+    return Bot2Settings().model_dump()
 
 
 def _read_raw_settings() -> dict[str, Any]:
     if not os.path.exists(SETTINGS_FILE):
         return {}
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}
 
 
 def load_settings() -> dict[str, Any]:
     merged = _defaults()
-    merged.update(_read_raw_settings())
-    validated = AppSettings.model_validate(merged)
+    raw = _read_raw_settings()
+    legacy_min_probability = raw.get("fair_value_min_probability")
+    if legacy_min_probability is not None:
+        raw.setdefault("fair_value_min_model_probability", legacy_min_probability)
+        raw.setdefault("fair_value_min_market_probability", legacy_min_probability)
+    merged.update(raw)
+    validated = Bot2Settings.model_validate(merged)
     return validated.model_dump()
 
 
 def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    validated = AppSettings.model_validate(settings).model_dump()
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(validated, f, indent=2, ensure_ascii=True)
+    validated = Bot2Settings.model_validate(settings).model_dump()
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+        json.dump(validated, fh, indent=2, ensure_ascii=True)
     return validated
 
 
@@ -171,4 +207,4 @@ def settings_equal(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
         return True
     if a is None or b is None:
         return False
-    return AppSettings.model_validate(a).model_dump() == AppSettings.model_validate(b).model_dump()
+    return Bot2Settings.model_validate(a).model_dump() == Bot2Settings.model_validate(b).model_dump()

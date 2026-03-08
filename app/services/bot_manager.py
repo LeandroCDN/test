@@ -21,6 +21,7 @@ from app.services.entry_strategy import (
     pick_best_candidate,
     get_dynamic_entry_params,
 )
+from app.services.volatility import fetch_candles, build_snapshot_from_candles, resolve_regime
 
 # ── lazy imports of trading modules ───────────────────────────────
 
@@ -138,6 +139,10 @@ class BotManager:
             "ENTRY_CHECK_INTERVAL_SECONDS": _get("entry_check_interval_seconds"),
             "ENTRY_CHECK_INTERVAL_FAST_SECONDS": _get("entry_check_interval_fast_seconds"),
             "ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS": _get("entry_check_interval_fast_threshold_seconds"),
+            "ENTRY_LIMIT_FLOATING_ENABLED": _get("entry_limit_floating_enabled"),
+            "ENTRY_LIMIT_PHASE_RATIO": _get("entry_limit_phase_ratio"),
+            "ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS": _get("entry_limit_reprice_interval_seconds"),
+            "ENTRY_LIMIT_MAX_REPRICES": _get("entry_limit_max_reprices"),
             "ENTRY_PROFILE_POINTS": _get("entry_profile_points"),
             "ENTRY_BALANCE_REFRESH_SECONDS": _get("entry_balance_refresh_seconds"),
             "MIN_BET_USDC": _get("min_bet_usdc"),
@@ -157,6 +162,18 @@ class BotManager:
             "STOP_LOSS_RETRY_SECONDS": _get("stop_loss_retry_seconds"),
             "FILL_SLIPPAGE_WARN_PCT": _get("fill_slippage_warn_pct"),
             "ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT": _get("entry_lock_market_on_high_odds_reject"),
+            "VOLATILITY_FILTER_ENABLED": _get("volatility_filter_enabled"),
+            "VOLATILITY_REFRESH_SECONDS": _get("volatility_refresh_seconds"),
+            "VOLATILITY_INTERVAL": _get("volatility_interval"),
+            "VOLATILITY_LOOKBACK_CANDLES": _get("volatility_lookback_candles"),
+            "VOLATILITY_LOW_THRESHOLD": _get("volatility_low_threshold"),
+            "VOLATILITY_HIGH_THRESHOLD": _get("volatility_high_threshold"),
+            "VOLATILITY_EXTREME_THRESHOLD": _get("volatility_extreme_threshold"),
+            "VOLATILITY_MIN_ODDS_BUMP_HIGH": _get("volatility_min_odds_bump_high"),
+            "VOLATILITY_MIN_ODDS_BUMP_EXTREME": _get("volatility_min_odds_bump_extreme"),
+            "VOLATILITY_CAPITAL_MULT_LOW": _get("volatility_capital_mult_low"),
+            "VOLATILITY_CAPITAL_MULT_HIGH": _get("volatility_capital_mult_high"),
+            "VOLATILITY_CAPITAL_MULT_EXTREME": _get("volatility_capital_mult_extreme"),
         }
 
     # ── main worker loop (runs in background thread) ──────────────
@@ -168,6 +185,8 @@ class BotManager:
         from config import (
             ENTRY_START_SECONDS, ENTRY_CHECK_INTERVAL_SECONDS,
             ENTRY_CHECK_INTERVAL_FAST_SECONDS, ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS,
+            ENTRY_LIMIT_FLOATING_ENABLED, ENTRY_LIMIT_PHASE_RATIO,
+            ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS, ENTRY_LIMIT_MAX_REPRICES,
             ENTRY_PROFILE_POINTS, ENTRY_BALANCE_REFRESH_SECONDS,
             MIN_BET_USDC, POLL_INTERVAL_SECONDS, POST_RESOLUTION_BUFFER_SECONDS,
             MAX_ODDS, WAIT_LOG_INTERVAL_SECONDS,
@@ -177,6 +196,11 @@ class BotManager:
             STOP_LOSS_ENABLED, STOP_LOSS_PCT, STOP_LOSS_POLL_SECONDS,
             STOP_LOSS_CONFIRM_TICKS, STOP_LOSS_RETRY_SECONDS, FILL_SLIPPAGE_WARN_PCT,
             ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT,
+            VOLATILITY_FILTER_ENABLED, VOLATILITY_REFRESH_SECONDS,
+            VOLATILITY_INTERVAL, VOLATILITY_LOOKBACK_CANDLES,
+            VOLATILITY_LOW_THRESHOLD, VOLATILITY_HIGH_THRESHOLD, VOLATILITY_EXTREME_THRESHOLD,
+            VOLATILITY_MIN_ODDS_BUMP_HIGH, VOLATILITY_MIN_ODDS_BUMP_EXTREME,
+            VOLATILITY_CAPITAL_MULT_LOW, VOLATILITY_CAPITAL_MULT_HIGH, VOLATILITY_CAPITAL_MULT_EXTREME,
         )
         from market import find_active_crypto_5m_market
         from trader import (
@@ -202,6 +226,10 @@ class BotManager:
             "entry_check_interval_seconds": ENTRY_CHECK_INTERVAL_SECONDS,
             "entry_check_interval_fast_seconds": ENTRY_CHECK_INTERVAL_FAST_SECONDS,
             "entry_check_interval_fast_threshold_seconds": ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS,
+            "entry_limit_floating_enabled": ENTRY_LIMIT_FLOATING_ENABLED,
+            "entry_limit_phase_ratio": ENTRY_LIMIT_PHASE_RATIO,
+            "entry_limit_reprice_interval_seconds": ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS,
+            "entry_limit_max_reprices": ENTRY_LIMIT_MAX_REPRICES,
             "entry_profile_points": ENTRY_PROFILE_POINTS,
             "entry_balance_refresh_seconds": ENTRY_BALANCE_REFRESH_SECONDS,
             "min_bet_usdc": MIN_BET_USDC,
@@ -221,6 +249,18 @@ class BotManager:
             "stop_loss_retry_seconds": STOP_LOSS_RETRY_SECONDS,
             "fill_slippage_warn_pct": FILL_SLIPPAGE_WARN_PCT,
             "entry_lock_market_on_high_odds_reject": ENTRY_LOCK_MARKET_ON_HIGH_ODDS_REJECT,
+            "volatility_filter_enabled": VOLATILITY_FILTER_ENABLED,
+            "volatility_refresh_seconds": VOLATILITY_REFRESH_SECONDS,
+            "volatility_interval": VOLATILITY_INTERVAL,
+            "volatility_lookback_candles": VOLATILITY_LOOKBACK_CANDLES,
+            "volatility_low_threshold": VOLATILITY_LOW_THRESHOLD,
+            "volatility_high_threshold": VOLATILITY_HIGH_THRESHOLD,
+            "volatility_extreme_threshold": VOLATILITY_EXTREME_THRESHOLD,
+            "volatility_min_odds_bump_high": VOLATILITY_MIN_ODDS_BUMP_HIGH,
+            "volatility_min_odds_bump_extreme": VOLATILITY_MIN_ODDS_BUMP_EXTREME,
+            "volatility_capital_mult_low": VOLATILITY_CAPITAL_MULT_LOW,
+            "volatility_capital_mult_high": VOLATILITY_CAPITAL_MULT_HIGH,
+            "volatility_capital_mult_extreme": VOLATILITY_CAPITAL_MULT_EXTREME,
         }
 
         runtime_settings = load_settings()
@@ -250,13 +290,6 @@ class BotManager:
             "total_entries": 0,
             "total_btc_entries": 0,
             "total_eth_entries": 0,
-            "total_wins": 0,
-            "total_losses": 0,
-            "total_unsettled": 0,
-            "total_stop_exits": 0,
-            "total_stop_wins": 0,
-            "total_stop_losses": 0,
-            "total_skipped": 0,
             "total_pnl": 0.0,
         })
         store.set_worker_status("running")
@@ -340,7 +373,6 @@ class BotManager:
 
         # entry paused?
         if store.is_entry_paused():
-            store.update_stats({"total_skipped": store.get_stats()["total_skipped"] + 1})
             store.push_event("round_skipped", {"reason": "Entry paused by user"})
             self._wait_for_resolution(markets, auto_redeemer, cfg)
             store.set_current_round(None)
@@ -349,7 +381,6 @@ class BotManager:
         # dynamic entry
         entry = self._attempt_dynamic_entry(client, markets, auto_redeemer, cfg, dry_run)
         if entry is None:
-            store.update_stats({"total_skipped": store.get_stats()["total_skipped"] + 1})
             store.push_event("round_skipped", {"reason": "No entry in dynamic window"})
             self._wait_for_resolution(markets, auto_redeemer, cfg)
             store.set_current_round(None)
@@ -435,18 +466,6 @@ class BotManager:
         s = store.get_stats()
         if outcome != "unsettled":
             s["total_pnl"] += pnl
-        if outcome == "win":
-            s["total_wins"] += 1
-        elif outcome == "loss":
-            s["total_losses"] += 1
-        elif outcome == "unsettled":
-            s["total_unsettled"] += 1
-        if stop_info.get("triggered"):
-            s["total_stop_exits"] += 1
-            if pnl > 0:
-                s["total_stop_wins"] += 1
-            elif pnl < 0:
-                s["total_stop_losses"] += 1
         store.update_stats(s)
 
         store.push_event("round_result", {
@@ -599,6 +618,51 @@ class BotManager:
                 best = sec if best is None else max(best, sec)
         return best
 
+    def _get_btc_vol_snapshot(self, cfg, cache):
+        now_ts = time.time()
+        refresh_s = max(1.0, float(cfg.get("VOLATILITY_REFRESH_SECONDS", 15)))
+        if cache.get("snapshot") is not None and (now_ts - cache.get("ts", 0.0)) < refresh_s:
+            return cache["snapshot"]
+        candles = fetch_candles(
+            "btc",
+            interval=str(cfg.get("VOLATILITY_INTERVAL", "1m")),
+            limit=max(3, int(cfg.get("VOLATILITY_LOOKBACK_CANDLES", 20))),
+        )
+        snapshot = build_snapshot_from_candles(candles)
+        cache["snapshot"] = snapshot
+        cache["ts"] = now_ts
+        return snapshot
+
+    @staticmethod
+    def _apply_volatility_profile(cfg, min_odds, capital_pct, snapshot):
+        if not cfg.get("VOLATILITY_FILTER_ENABLED", True) or not snapshot:
+            return min_odds, capital_pct, "off"
+        regime = resolve_regime(
+            snapshot["score"],
+            low_th=float(cfg.get("VOLATILITY_LOW_THRESHOLD", 0.0018)),
+            high_th=float(cfg.get("VOLATILITY_HIGH_THRESHOLD", 0.0040)),
+            extreme_th=float(cfg.get("VOLATILITY_EXTREME_THRESHOLD", 0.0065)),
+        )
+        if regime == "low":
+            return (
+                max(0.01, min_odds - 0.005),
+                min(1.0, capital_pct * float(cfg.get("VOLATILITY_CAPITAL_MULT_LOW", 1.10))),
+                regime,
+            )
+        if regime == "high":
+            return (
+                min(0.999, min_odds + float(cfg.get("VOLATILITY_MIN_ODDS_BUMP_HIGH", 0.02))),
+                capital_pct * float(cfg.get("VOLATILITY_CAPITAL_MULT_HIGH", 0.70)),
+                regime,
+            )
+        if regime == "extreme":
+            return (
+                min(0.999, min_odds + float(cfg.get("VOLATILITY_MIN_ODDS_BUMP_EXTREME", 0.04))),
+                capital_pct * float(cfg.get("VOLATILITY_CAPITAL_MULT_EXTREME", 0.45)),
+                regime,
+            )
+        return min_odds, capital_pct, regime
+
     # ── dynamic entry ─────────────────────────────────────────────
 
     def _attempt_dynamic_entry(self, client, markets, auto_redeemer, cfg, dry_run):
@@ -609,6 +673,7 @@ class BotManager:
         balance_snapshot = None
         balance_snapshot_ts = 0.0
         blocked_market_slugs = set()
+        vol_cache = {"snapshot": None, "ts": 0.0}
 
         while not self._stop_event.is_set():
             now = datetime.now(timezone.utc)
@@ -619,6 +684,10 @@ class BotManager:
             params = get_dynamic_entry_params(seconds_left, cfg["ENTRY_PROFILE_POINTS"])
             min_odds = params["min_odds"]
             capital_pct = params["capital_pct"]
+            vol_snapshot = self._get_btc_vol_snapshot(cfg, vol_cache)
+            min_odds, capital_pct, vol_regime = self._apply_volatility_profile(
+                cfg, min_odds, capital_pct, vol_snapshot
+            )
 
             token_ids = []
             for m in markets.values():
@@ -667,13 +736,34 @@ class BotManager:
                 if bet_amount < cfg["MIN_BET_USDC"]:
                     return None
 
-                order_response = place_bet(client, chosen["token_id"], bet_amount, dry_run=dry_run)
+                market_phase_start_s = cfg["ENTRY_START_SECONDS"] * (1.0 - float(cfg["ENTRY_LIMIT_PHASE_RATIO"]))
+                use_limit = cfg.get("ENTRY_LIMIT_FLOATING_ENABLED", True) and seconds_left > market_phase_start_s
+                execution_mode = "limit" if use_limit else "market"
+                order_response = place_bet(
+                    client,
+                    chosen["token_id"],
+                    bet_amount,
+                    dry_run=dry_run,
+                    execution_mode=execution_mode,
+                    limit_max_price=min(cfg["MAX_ODDS"], chosen["buy_price"]),
+                    limit_reprice_interval_seconds=cfg["ENTRY_LIMIT_REPRICE_INTERVAL_SECONDS"],
+                    limit_max_reprices=cfg["ENTRY_LIMIT_MAX_REPRICES"],
+                )
                 if order_response is not None:
                     self._redeem_pending = True
                     self._next_redeem_probe_ts = 0.0
                     effective_amount = bet_amount
                     if isinstance(order_response, dict):
                         effective_amount = float(order_response.get("_effective_amount", bet_amount))
+                    store.push_event(
+                        "entry_execution_mode",
+                        {
+                            "mode": execution_mode,
+                            "seconds_left": round(seconds_left, 1),
+                            "vol_regime": vol_regime,
+                        },
+                        level="debug",
+                    )
                     return {
                         "asset": chosen["asset"],
                         "market": chosen["market"],
@@ -684,6 +774,7 @@ class BotManager:
                         "min_odds_at_entry": min_odds,
                         "capital_pct_at_entry": capital_pct,
                         "seconds_left_at_entry": seconds_left,
+                        "execution_mode": execution_mode,
                         "order_response": order_response,
                     }
 

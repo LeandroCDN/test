@@ -7,6 +7,7 @@ from eth_utils import keccak
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     MarketOrderArgs,
+    OrderArgs,
     OrderType,
     BalanceAllowanceParams,
     AssetType,
@@ -197,6 +198,16 @@ def _supported_entry_order_types():
     return order_types
 
 
+def _supported_limit_entry_order_types():
+    order_types = []
+    for maybe in ("FAK", "IOC", "GTC"):
+        if hasattr(OrderType, maybe):
+            order_types.append(getattr(OrderType, maybe))
+    if not order_types:
+        order_types = [OrderType.FOK]
+    return order_types
+
+
 def _attempt_market_buy_with_type(client, token_id, amount, order_type):
     market_order = MarketOrderArgs(
         token_id=token_id,
@@ -239,7 +250,82 @@ def _execute_with_retries(client, token_id, amount, order_type):
     return None, last_exc
 
 
-def place_bet(client, token_id, amount, dry_run=False):
+def _attempt_limit_buy_with_type(client, token_id, amount, limit_price, order_type):
+    if limit_price <= 0:
+        raise ValueError("Invalid limit_price")
+    size = amount / limit_price
+    order = OrderArgs(
+        token_id=str(token_id),
+        price=float(limit_price),
+        size=float(size),
+        side=BUY,
+    )
+    signed_order = client.create_order(order)
+    response = client.post_order(signed_order, order_type)
+    return response
+
+
+def _attempt_limit_sell_with_type(client, token_id, shares, limit_price, order_type):
+    if limit_price <= 0:
+        raise ValueError("Invalid limit_price")
+    if shares <= 0:
+        raise ValueError("Invalid share size")
+    order = OrderArgs(
+        token_id=str(token_id),
+        price=float(limit_price),
+        size=float(shares),
+        side=SELL,
+    )
+    signed_order = client.create_order(order)
+    response = client.post_order(signed_order, order_type)
+    return response
+
+
+def _execute_limit_floating(client, token_id, amount, max_price, order_type, reprice_interval_s, max_reprices):
+    attempts = max(1, int(max_reprices) + 1)
+    last_exc = None
+    for i in range(1, attempts + 1):
+        ask = get_token_price(client, token_id)
+        if ask is None or ask <= 0:
+            last_exc = RuntimeError("No valid ask price")
+            time.sleep(max(0.0, float(reprice_interval_s)))
+            continue
+        if ask >= max_price:
+            print(
+                f"[TRADER] Floating limit skipped: ask={ask:.4f} >= max_price={max_price:.4f} "
+                f"(attempt {i}/{attempts})"
+            )
+            return None, None
+        limit_price = round(min(max_price, ask), 4)
+        try:
+            response = _attempt_limit_buy_with_type(client, token_id, amount, limit_price, order_type)
+            print(
+                f"[TRADER] Floating limit {i}/{attempts} {_order_type_name(order_type)} OK "
+                f"amount=${amount:.2f} price={limit_price:.4f} ({_short_order_response(response)})"
+            )
+            return response, None
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[TRADER] Floating limit {i}/{attempts} {_order_type_name(order_type)} failed "
+                f"amount=${amount:.2f} price={limit_price:.4f} | {e}"
+            )
+            if i < attempts:
+                time.sleep(max(0.0, float(reprice_interval_s)))
+    return None, last_exc
+
+
+def place_bet(
+    client,
+    token_id,
+    amount,
+    dry_run=False,
+    *,
+    execution_mode="market",
+    limit_max_price=None,
+    limit_reprice_interval_seconds=1.0,
+    limit_max_reprices=1,
+):
     """
     Aggressive entry execution.
 
@@ -251,8 +337,37 @@ def place_bet(client, token_id, amount, dry_run=False):
     Returns a dict response on any successful fill, or None.
     """
     if dry_run:
-        print(f"[DRY RUN] Would buy ${amount:.2f} of token {token_id[:16]}...")
-        return {"dry_run": True, "amount": amount, "token_id": token_id}
+        mode = str(execution_mode).lower().strip()
+        print(f"[DRY RUN] Would buy ${amount:.2f} of token {token_id[:16]}... mode={mode}")
+        return {"dry_run": True, "amount": amount, "token_id": token_id, "_execution_mode": mode}
+
+    mode = str(execution_mode).lower().strip()
+    if mode == "limit":
+        if limit_max_price is None or float(limit_max_price) <= 0:
+            print("[TRADER] Floating limit skipped: invalid max price cap")
+            return None
+        order_types = _supported_limit_entry_order_types()
+        last_exc = None
+        for order_type in order_types:
+            response, exc = _execute_limit_floating(
+                client=client,
+                token_id=token_id,
+                amount=amount,
+                max_price=float(limit_max_price),
+                order_type=order_type,
+                reprice_interval_s=limit_reprice_interval_seconds,
+                max_reprices=limit_max_reprices,
+            )
+            if response is not None:
+                out = dict(response) if isinstance(response, dict) else {"status": "ok"}
+                out["_effective_amount"] = round(amount, 2)
+                out["_attempted_amount"] = round(amount, 2)
+                out["_execution_mode"] = "limit"
+                return out
+            last_exc = exc
+        if last_exc is not None:
+            print(f"[TRADER] Floating limit failed: {last_exc}")
+        return None
 
     order_types = _supported_entry_order_types()
     # Slice policy requested: 50% / 50%
@@ -280,6 +395,7 @@ def place_bet(client, token_id, amount, dry_run=False):
                     out = dict(response) if isinstance(response, dict) else {"status": "ok"}
                     out["_effective_amount"] = round(successful_amount, 2)
                     out["_attempted_amount"] = round(amount, 2)
+                    out["_execution_mode"] = "market"
                     return out
                 # For split mode, continue to try the remaining slice(s).
                 break
@@ -314,6 +430,7 @@ def place_bet(client, token_id, amount, dry_run=False):
         "orderID": order_ids[0] if order_ids else None,
         "_effective_amount": round(successful_amount, 2),
         "_attempted_amount": round(amount, 2),
+        "_execution_mode": "market",
     }
     print(
         f"[TRADER] Entry partial/combined fill: filled=${successful_amount:.2f} "
@@ -341,6 +458,42 @@ def sell_shares(client, token_id, shares, dry_run=False):
         return response
     except Exception as e:
         print(f"[TRADER] Sell order failed: {e}")
+        return None
+
+
+def place_limit_sell(client, token_id, shares, limit_price, dry_run=False):
+    """Place a resting take-profit sell order."""
+    if dry_run:
+        print(
+            f"[DRY RUN] Would place limit sell of {shares:.2f} shares for token {token_id[:16]} @ {limit_price:.4f}"
+        )
+        return {
+            "dry_run": True,
+            "shares": shares,
+            "token_id": token_id,
+            "limit_price": limit_price,
+        }
+
+    for maybe in ("GTC", "FAK", "IOC"):
+        if hasattr(OrderType, maybe):
+            order_type = getattr(OrderType, maybe)
+            break
+    else:
+        order_type = OrderType.FOK
+
+    try:
+        response = _attempt_limit_sell_with_type(client, token_id, shares, limit_price, order_type)
+        print(
+            f"[TRADER] Limit sell placed {_order_type_name(order_type)} "
+            f"shares={shares:.4f} price={limit_price:.4f} ({_short_order_response(response)})"
+        )
+        out = dict(response) if isinstance(response, dict) else {"status": "ok"}
+        out["_shares"] = round(float(shares), 4)
+        out["_limit_price"] = round(float(limit_price), 4)
+        out["_order_type"] = _order_type_name(order_type)
+        return out
+    except Exception as e:
+        print(f"[TRADER] Limit sell failed: {e}")
         return None
 
 
