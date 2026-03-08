@@ -1,3 +1,42 @@
+## 1. Instalación (PowerShell)
+
+```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1; pip install -r requirements.txt
-cd web; npm install
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cd web
+npm install
+cd ..
+```
+
+*Nota: Asegurate de copiar tu archivo `.env` con la `PK` configurada.*
+
+## 2. Ejecutar Bot 2 (Backend)
+
+En una terminal dedicada (con venv activado):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "$PWD"
+python scripts/run_bot2_api.py
+```
+
+*Esto levanta la API en http://localhost:8001*
+
+## 3. Ejecutar Frontend
+
+En otra terminal:
+
+```powershell
+cd web
+npm run dev
+```
+
+*Esto levanta la UI en http://localhost:5173 (o similar)*
+
+## 4. Iniciar el Bot
+
+1. Abrí la URL del frontend.
+2. Navegá a **"Crypto 5-Min Bot 2"** (o `/bot-2`).
+3. Verificá que el status diga `stopped` y la API responda.
+4. Hacé click en **Start** (para operar real) o **Dry Run** (para simular).
