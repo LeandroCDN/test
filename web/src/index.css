@@ -41,7 +41,7 @@ a {
 }
 
 .top-nav-inner {
-  max-width: 960px;
+  width: min(1800px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 14px 16px;
   display: flex;
@@ -70,7 +70,7 @@ a {
 }
 
 .app {
-  max-width: 960px;
+  width: min(1800px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 24px 16px;
 }
@@ -247,7 +247,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .signal-summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
 }
 
@@ -307,8 +307,21 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
+}
+
+@media (max-width: 1100px) {
+  .top-nav-inner,
+  .app {
+    width: calc(100vw - 24px);
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .signal-summary-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
 }
 
 .setting-item {

@@ -42,8 +42,14 @@ class Bot2Manager:
 
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
+        self._redeem_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._force_redeem_event = threading.Event()
+        self._redeem_wakeup_event = threading.Event()
+        self._redeem_request_lock = threading.Lock()
+        self._redeem_requested = False
+        self._redeem_force_requested = False
+        self._redeem_reason = "loop"
         self._lock = threading.Lock()
         self._active_settings: dict[str, Any] | None = None
         self._redeem_pending = True
@@ -102,7 +108,7 @@ class Bot2Manager:
     def force_redeem(self) -> tuple[bool, str]:
         if store.get_worker_status() != "running":
             return False, "Worker not running"
-        self._force_redeem_event.set()
+        self._request_redeem(reason="force_redeem", force=True)
         store.push_event("force_redeem_requested")
         return True, "Force-redeem queued"
 
@@ -112,12 +118,57 @@ class Bot2Manager:
     def clear_force_redeem(self) -> None:
         self._force_redeem_event.clear()
 
+    def _request_redeem(self, *, reason: str, force: bool = False) -> None:
+        with self._redeem_request_lock:
+            self._redeem_requested = True
+            self._redeem_reason = reason
+            if force:
+                self._redeem_force_requested = True
+                self._force_redeem_event.set()
+        self._redeem_wakeup_event.set()
+
+    def _redeem_loop(self, auto_redeemer, cfg: dict[str, Any]) -> None:
+        while not self._stop_event.is_set():
+            self._redeem_wakeup_event.wait(timeout=1.0)
+            self._redeem_wakeup_event.clear()
+
+            force = False
+            reason = "redeem_bg"
+            requested = False
+            with self._redeem_request_lock:
+                if self._redeem_requested:
+                    requested = True
+                    reason = self._redeem_reason
+                    self._redeem_requested = False
+                if self._redeem_force_requested:
+                    force = True
+                    self._redeem_force_requested = False
+                    self._force_redeem_event.clear()
+
+            # Keep auto-redeem cadence alive even without explicit requests.
+            if (not requested) and (not force) and (not self._redeem_pending):
+                continue
+
+            try:
+                self._try_redeem(
+                    auto_redeemer,
+                    cfg,
+                    force=force,
+                    reason=("force_redeem" if force else reason),
+                )
+            except Exception as exc:
+                store.push_event("redeem_error", {"errors": [str(exc)]}, level="warn")
+
     @staticmethod
     def _build_cfg(runtime_settings: dict[str, Any]) -> dict[str, Any]:
         return {
             "ENABLED_ASSETS": runtime_settings.get("enabled_assets", list(bot2_cfg.ENABLED_ASSETS)),
             "ASSET_PRIORITY": list(bot2_cfg.ASSET_PRIORITY),
             "ENTRY_START_SECONDS": runtime_settings.get("entry_start_seconds", bot2_cfg.ENTRY_START_SECONDS),
+            "LIVE_MONITOR_START_SECONDS": runtime_settings.get(
+                "live_monitor_start_seconds",
+                bot2_cfg.LIVE_MONITOR_START_SECONDS,
+            ),
             "ENTRY_CHECK_INTERVAL_SECONDS": runtime_settings.get(
                 "entry_check_interval_seconds",
                 bot2_cfg.ENTRY_CHECK_INTERVAL_SECONDS,
@@ -266,6 +317,22 @@ class Bot2Manager:
                 "fair_value_min_market_probability",
                 bot2_cfg.FAIR_VALUE_MIN_MARKET_PROBABILITY,
             ),
+            "IGNORE_EDGE_FILTER": runtime_settings.get(
+                "ignore_edge_filter",
+                bot2_cfg.IGNORE_EDGE_FILTER,
+            ),
+            "CERTAINTY_SECONDS_THRESHOLD": runtime_settings.get(
+                "certainty_seconds_threshold",
+                bot2_cfg.CERTAINTY_SECONDS_THRESHOLD,
+            ),
+            "CERTAINTY_AVG_THRESHOLD": runtime_settings.get(
+                "certainty_avg_threshold",
+                bot2_cfg.CERTAINTY_AVG_THRESHOLD,
+            ),
+            "ROLLING_WINDOW_SECONDS": runtime_settings.get(
+                "rolling_window_seconds",
+                bot2_cfg.ROLLING_WINDOW_SECONDS,
+            ),
         }
 
     def _run_loop(self, dry_run: bool) -> None:
@@ -334,6 +401,19 @@ class Bot2Manager:
         self._next_redeem_probe_ts = 0.0
         self._next_redeem_attempt_ts = 0.0
         self._redeem_attempt_counter = 0
+        self._redeem_requested = False
+        self._redeem_force_requested = False
+        self._redeem_reason = "worker_start"
+        self._redeem_wakeup_event.clear()
+        self._force_redeem_event.clear()
+        self._redeem_thread = threading.Thread(
+            target=self._redeem_loop,
+            args=(auto_redeemer, cfg),
+            daemon=True,
+            name="bot2-redeem-worker",
+        )
+        self._redeem_thread.start()
+        self._request_redeem(reason="worker_start", force=False)
 
         try:
             while not self._stop_event.is_set():
@@ -343,6 +423,9 @@ class Bot2Manager:
                     store.push_event("round_error", {"message": str(exc)}, level="error")
                     self._interruptible_sleep(5)
         finally:
+            self._redeem_wakeup_event.set()
+            if self._redeem_thread and self._redeem_thread.is_alive():
+                self._redeem_thread.join(timeout=2.0)
             try:
                 new_balance = get_balance(client)
             except Exception:
@@ -352,10 +435,12 @@ class Bot2Manager:
             store.set_worker_status("stopped")
             store.set_current_round(None)
             store.set_latest_evaluation(None)
+            store.clear_eval_history()
             self._active_settings = None
             self._redeem_pending = True
             self._next_redeem_probe_ts = 0.0
             self._next_redeem_attempt_ts = 0.0
+            self._redeem_thread = None
             self._fn = {}
 
     def _run_single_round(self, *, client, auto_redeemer, dry_run: bool, cfg: dict[str, Any]) -> None:
@@ -366,15 +451,14 @@ class Bot2Manager:
         round_num = stats["total_rounds"] + 1
         store.update_stats({"total_rounds": round_num, "current_balance": get_balance(client)})
 
-        self._try_redeem(auto_redeemer, cfg, reason="round_start")
-        self._handle_force_redeem(auto_redeemer, cfg)
+        self._request_redeem(reason="round_start")
 
         enabled_assets = self._ordered_assets(cfg["ENABLED_ASSETS"], cfg["ASSET_PRIORITY"])
         markets: dict[str, Any] = {}
         while not markets and not self._stop_event.is_set():
             markets = self._discover_markets(enabled_assets)
             if not markets:
-                self._try_redeem(auto_redeemer, cfg, reason="market_discovery")
+                self._request_redeem(reason="market_discovery")
                 self._interruptible_sleep(cfg["POLL_INTERVAL_SECONDS"])
 
         if self._stop_event.is_set() or not markets:
@@ -488,7 +572,7 @@ class Bot2Manager:
 
         starting_balance = float(store.get_stats()["current_balance"])
         self._wait_for_resolution(markets, auto_redeemer, cfg)
-        self._try_redeem(auto_redeemer, cfg, reason="post_resolution")
+        self._request_redeem(reason="post_resolution")
 
         new_balance = get_balance(client)
         pnl = new_balance - starting_balance
@@ -601,6 +685,10 @@ class Bot2Manager:
                     max_spread=cfg["FAIR_VALUE_MAX_SPREAD"],
                     min_model_probability=cfg["FAIR_VALUE_MIN_MODEL_PROBABILITY"],
                     min_market_probability=cfg["FAIR_VALUE_MIN_MARKET_PROBABILITY"],
+                    ignore_edge_filter=bool(cfg.get("IGNORE_EDGE_FILTER", False)),
+                    certainty_seconds_threshold=cfg["CERTAINTY_SECONDS_THRESHOLD"],
+                    certainty_avg_threshold=cfg["CERTAINTY_AVG_THRESHOLD"],
+                    seconds_left=seconds_left,
                 )
                 candidate = evaluation["candidate"]
                 if candidate:
@@ -615,10 +703,19 @@ class Bot2Manager:
 
                 up_eval = evaluation["sides"].get("up", {})
                 down_eval = evaluation["sides"].get("down", {})
+
+                up_model = float(up_eval.get("fair_value") or 0)
+                down_model = float(down_eval.get("fair_value") or 0)
+                up_market = float(up_eval.get("buy_price") or 0)
+                down_market = float(down_eval.get("buy_price") or 0)
+                store.record_eval_snapshot(asset, up_model, down_model, up_market, down_market)
+                rolling = store.get_rolling_stats(asset, cfg["ROLLING_WINDOW_SECONDS"])
+
                 asset_evaluations[asset] = {
                     "asset": asset,
                     "decision": evaluation["decision"],
                     "reason": evaluation["reason"],
+                    "forced_side": evaluation.get("forced_side"),
                     "side": candidate["side"] if candidate else evaluation["best_side"]["side"] if evaluation["best_side"] else None,
                     "seconds_left": round(seconds_left, 1),
                     "open_price": round(reference["open_price"], 2),
@@ -628,11 +725,13 @@ class Bot2Manager:
                     "model_regime": model_regime,
                     "remaining_vol_pct": round(rem_vol_pct * 100, 4),
                     "min_edge": round(min_edge, 4),
+                    "rolling": rolling,
                     "up": {
                         "fair_value": round(up_eval.get("fair_value"), 4) if up_eval.get("fair_value") is not None else None,
                         "buy_price": round(up_eval.get("buy_price"), 4) if up_eval.get("buy_price") is not None else None,
                         "edge": round(up_eval.get("edge"), 4) if up_eval.get("edge") is not None else None,
                         "spread": round(up_eval.get("spread"), 4) if up_eval.get("spread") is not None else None,
+                        "avg_prob": round(up_eval.get("avg_prob"), 4) if up_eval.get("avg_prob") is not None else None,
                         "eligible": bool(up_eval.get("eligible")),
                         "reason": up_eval.get("reason"),
                         "checks": up_eval.get("checks", {}),
@@ -642,6 +741,7 @@ class Bot2Manager:
                         "buy_price": round(down_eval.get("buy_price"), 4) if down_eval.get("buy_price") is not None else None,
                         "edge": round(down_eval.get("edge"), 4) if down_eval.get("edge") is not None else None,
                         "spread": round(down_eval.get("spread"), 4) if down_eval.get("spread") is not None else None,
+                        "avg_prob": round(down_eval.get("avg_prob"), 4) if down_eval.get("avg_prob") is not None else None,
                         "eligible": bool(down_eval.get("eligible")),
                         "reason": down_eval.get("reason"),
                         "checks": down_eval.get("checks", {}),
@@ -650,8 +750,22 @@ class Bot2Manager:
 
             selected_candidate = None
             if candidates:
-                candidates.sort(key=lambda item: (item["priority"], -item["edge"], -item["buy_price"]))
+                if bool(cfg.get("IGNORE_EDGE_FILTER", False)):
+                    candidates.sort(key=lambda item: (item["priority"], -item.get("avg_prob", 0.0), -item["buy_price"]))
+                else:
+                    candidates.sort(key=lambda item: (item["priority"], -item["edge"], -item["buy_price"]))
                 selected_candidate = candidates[0]
+
+            if selected_candidate is not None:
+                if selected_candidate["seconds_left"] > float(cfg["ENTRY_START_SECONDS"]):
+                    asset = str(selected_candidate["asset"])
+                    asset_eval = asset_evaluations.get(asset)
+                    if asset_eval is not None:
+                        asset_eval["decision"] = "watching"
+                        asset_eval["reason"] = (
+                            f"Live monitoring only. Entries start at {int(cfg['ENTRY_START_SECONDS'])}s"
+                        )
+                    selected_candidate = None
 
             store.set_latest_evaluation(
                 self._build_live_evaluation(
@@ -662,7 +776,7 @@ class Bot2Manager:
             )
 
             if selected_candidate is None:
-                self._try_redeem(auto_redeemer, cfg, reason="entry_loop")
+                self._request_redeem(reason="entry_loop")
                 self._interruptible_sleep(
                     cfg["ENTRY_CHECK_INTERVAL_FAST_SECONDS"]
                     if self._seconds_left_for_markets(live_markets) <= cfg["ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS"]
@@ -805,6 +919,12 @@ class Bot2Manager:
             "side": focus_eval.get("side"),
             "min_model_probability": cfg["FAIR_VALUE_MIN_MODEL_PROBABILITY"],
             "min_market_probability": cfg["FAIR_VALUE_MIN_MARKET_PROBABILITY"],
+            "ignore_edge_filter": bool(cfg.get("IGNORE_EDGE_FILTER", False)),
+            "live_monitor_start_seconds": cfg.get("LIVE_MONITOR_START_SECONDS"),
+            "entry_start_seconds": cfg["ENTRY_START_SECONDS"],
+            "certainty_avg_threshold": cfg["CERTAINTY_AVG_THRESHOLD"],
+            "certainty_seconds_threshold": cfg["CERTAINTY_SECONDS_THRESHOLD"],
+            "rolling_window_seconds": cfg["ROLLING_WINDOW_SECONDS"],
             "bet_sizing_mode": cfg["BET_SIZING_MODE"],
             "fixed_bet_usdc": max(1.0, float(cfg["MIN_BET_USDC"])),
             "assets": asset_evaluations,
@@ -812,15 +932,15 @@ class Bot2Manager:
 
     def _wait_until_entry_window(self, markets: dict[str, Any], auto_redeemer, cfg: dict[str, Any]) -> None:
         seconds_left = self._seconds_left_for_markets(markets)
-        if seconds_left <= cfg["ENTRY_START_SECONDS"]:
+        evaluation_start_seconds = float(cfg.get("LIVE_MONITOR_START_SECONDS", cfg["ENTRY_START_SECONDS"]))
+        if seconds_left <= evaluation_start_seconds:
             return
-        wait_remaining = seconds_left - cfg["ENTRY_START_SECONDS"]
+        wait_remaining = seconds_left - evaluation_start_seconds
         while wait_remaining > 0 and not self._stop_event.is_set():
             chunk = min(cfg["WAIT_LOG_INTERVAL_SECONDS"], wait_remaining)
             self._interruptible_sleep(chunk)
             wait_remaining -= chunk
-            self._try_redeem(auto_redeemer, cfg, reason="pre_entry_wait")
-            self._handle_force_redeem(auto_redeemer, cfg)
+            self._request_redeem(reason="pre_entry_wait")
 
     def _wait_for_resolution(self, markets: dict[str, Any], auto_redeemer, cfg: dict[str, Any]) -> None:
         seconds_left = self._seconds_left_for_markets(markets)
@@ -829,18 +949,12 @@ class Bot2Manager:
             chunk = min(cfg["WAIT_LOG_INTERVAL_SECONDS"], wait)
             self._interruptible_sleep(chunk)
             wait -= chunk
-            self._try_redeem(auto_redeemer, cfg, reason="wait_resolution")
-            self._handle_force_redeem(auto_redeemer, cfg)
+            self._request_redeem(reason="wait_resolution")
 
     def _interruptible_sleep(self, seconds: float) -> None:
         end = time.time() + max(0.0, seconds)
         while time.time() < end and not self._stop_event.is_set():
             time.sleep(min(0.25, end - time.time()))
-
-    def _handle_force_redeem(self, auto_redeemer, cfg: dict[str, Any]) -> None:
-        if self.should_force_redeem():
-            self._try_redeem(auto_redeemer, cfg, force=True, reason="force_redeem")
-            self.clear_force_redeem()
 
     def _get_vol_snapshot(self, asset: str, cfg: dict[str, Any], cache: dict[str, Any]) -> dict[str, Any] | None:
         now_ts = time.time()

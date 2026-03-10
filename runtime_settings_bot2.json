@@ -1,10 +1,10 @@
 {
   "enabled_assets": [
     "btc",
-    "eth",
-    "sol"
+    "eth"
   ],
-  "entry_start_seconds": 38,
+  "entry_start_seconds": 30,
+  "live_monitor_start_seconds": 60,
   "entry_check_interval_seconds": 1.0,
   "entry_check_interval_fast_seconds": 0.5,
   "entry_check_interval_fast_threshold_seconds": 12,
@@ -62,7 +62,7 @@
   ],
   "min_bet_usdc": 1.0,
   "bet_sizing_mode": "fixed",
-  "max_odds": 0.97,
+  "max_odds": 0.99,
   "fill_slippage_warn_pct": 0.02,
   "poll_interval_seconds": 3,
   "post_resolution_buffer_seconds": 10,
@@ -94,6 +94,10 @@
   "fair_value_max_spread": 0.06,
   "fair_value_requote_threshold": 0.015,
   "fair_value_aggressive_edge": 0.045,
-  "fair_value_min_model_probability": 0.5,
-  "fair_value_min_market_probability": 0.47
+  "fair_value_min_model_probability": 0.75,
+  "fair_value_min_market_probability": 0.85,
+  "ignore_edge_filter": true,
+  "certainty_seconds_threshold": 30,
+  "certainty_avg_threshold": 0.8,
+  "rolling_window_seconds": 60
 }

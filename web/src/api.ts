@@ -25,6 +25,7 @@ export interface Stats {
 export interface Settings {
   enabled_assets: string[];
   entry_start_seconds: number;
+  live_monitor_start_seconds?: number;
   entry_check_interval_seconds: number;
   entry_check_interval_fast_seconds: number;
   entry_check_interval_fast_threshold_seconds: number;
@@ -66,6 +67,10 @@ export interface Settings {
   fair_value_aggressive_edge?: number;
   fair_value_min_model_probability?: number;
   fair_value_min_market_probability?: number;
+  ignore_edge_filter?: boolean;
+  certainty_seconds_threshold?: number;
+  certainty_avg_threshold?: number;
+  rolling_window_seconds?: number;
 }
 
 export interface SettingsResponse {
@@ -87,15 +92,26 @@ export interface LiveEvaluationSide {
   buy_price?: number | null;
   edge?: number | null;
   spread?: number | null;
+  avg_prob?: number | null;
   eligible?: boolean;
   reason?: string;
   checks?: Record<string, boolean>;
+}
+
+export interface RollingStats {
+  samples?: number;
+  window?: number;
+  avg_up_model?: number;
+  avg_down_model?: number;
+  avg_up_market?: number;
+  avg_down_market?: number;
 }
 
 export interface LiveEvaluationAsset {
   asset?: string;
   decision?: string;
   reason?: string;
+  forced_side?: string | null;
   side?: string | null;
   seconds_left?: number;
   open_price?: number;
@@ -105,6 +121,7 @@ export interface LiveEvaluationAsset {
   model_regime?: string;
   remaining_vol_pct?: number;
   min_edge?: number;
+  rolling?: RollingStats;
   up?: LiveEvaluationSide;
   down?: LiveEvaluationSide;
 }
@@ -116,6 +133,12 @@ export interface LiveEvaluation {
   side?: string | null;
   min_model_probability?: number;
   min_market_probability?: number;
+  ignore_edge_filter?: boolean;
+  live_monitor_start_seconds?: number;
+  entry_start_seconds?: number;
+  certainty_avg_threshold?: number;
+  certainty_seconds_threshold?: number;
+  rolling_window_seconds?: number;
   bet_sizing_mode?: string;
   fixed_bet_usdc?: number;
   assets?: Record<string, LiveEvaluationAsset>;

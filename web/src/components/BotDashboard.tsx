@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BotApi, BotEvent, LiveEvaluation, LiveEvaluationAsset, LiveEvaluationSide, Settings } from "../api";
+import type { BotApi, BotEvent, LiveEvaluation, LiveEvaluationAsset, LiveEvaluationSide, RollingStats, Settings } from "../api";
 import { useEvents, useStatus } from "../hooks";
 
 type Bot2SignalData = {
@@ -145,11 +145,42 @@ function assetLabel(asset: unknown): string {
   return asText(asset).toUpperCase() || "--";
 }
 
-function bestSideForAsset(data: LiveEvaluationAsset | undefined): LiveEvaluationSide | undefined {
-  if (!data) return undefined;
-  if (data.side === "down") return data.down;
-  if (data.side === "up") return data.up;
-  return data.up?.eligible ? data.up : data.down;
+
+function SidePanel({ label, side, rolling_key, rolling }: {
+  label: string;
+  side: LiveEvaluationSide | undefined;
+  rolling_key: "up" | "down";
+  rolling: RollingStats | undefined;
+}) {
+  const avgModel = rolling_key === "up" ? rolling?.avg_up_model : rolling?.avg_down_model;
+  const avgMarket = rolling_key === "up" ? rolling?.avg_up_market : rolling?.avg_down_market;
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="metric-label">{label}</div>
+      <div className="signal-summary-line"><span>Model</span><strong>{formatProbability(side?.fair_value)}</strong></div>
+      <div className="signal-summary-line"><span>Market</span><strong>{formatProbability(side?.buy_price)}</strong></div>
+      <div className="signal-summary-line"><span>Avg(M+Mkt)</span><strong>{formatProbability(side?.avg_prob)}</strong></div>
+      <div className="signal-summary-line"><span>Edge</span><strong>{formatEdgePoints(side?.edge)}</strong></div>
+      <div className="signal-summary-line">
+        <span>Status</span>
+        <strong className={side?.eligible ? "signal-side-good" : "signal-side-warn"}>
+          {side?.eligible ? "Eligible" : "Blocked"}
+        </strong>
+      </div>
+      <p className="muted" style={{ fontSize: "0.75rem" }}>{asText(side?.reason) || "--"}</p>
+      {rolling && (rolling?.samples ?? 0) > 0 && (
+        <>
+          <div className="signal-summary-line"><span>Avg Model ({rolling.window}s)</span><strong>{formatProbability(avgModel)}</strong></div>
+          <div className="signal-summary-line"><span>Avg Market ({rolling.window}s)</span><strong>{formatProbability(avgMarket)}</strong></div>
+        </>
+      )}
+      <div className="signal-check-list">
+        {Object.entries(side?.checks || {}).map(([key, ok]) => (
+          <CheckRow key={key} label={key.replace(/_/g, " ")} ok={ok} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function AssetEvaluationCard({
@@ -159,47 +190,25 @@ function AssetEvaluationCard({
   asset: string;
   data: LiveEvaluationAsset | undefined;
 }) {
-  const focusSide = bestSideForAsset(data);
   return (
     <div className="signal-summary-card">
-      <div className="metric-label">{assetLabel(asset)}</div>
-      <div className="signal-summary-line">
-        <span>Best side</span>
-        <strong>{asText(data?.side).toUpperCase() || "--"}</strong>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div className="metric-label" style={{ marginBottom: 0 }}>{assetLabel(asset)}</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: "0.75rem" }}>Best: <strong>{asText(data?.side).toUpperCase() || "--"}</strong></span>
+          {data?.forced_side && <span className="badge badge-yellow" style={{ fontSize: "0.65rem" }}>Cert: {data.forced_side.toUpperCase()}</span>}
+        </div>
       </div>
-      <div className="signal-summary-line">
-        <span>Model</span>
-        <strong>{formatProbability(focusSide?.fair_value)}</strong>
+      <div className="signal-summary-line"><span>Time left</span><strong>{asNumber(data?.seconds_left)?.toFixed(1) ?? "--"}s</strong></div>
+      <div className="signal-summary-line"><span>Move</span><strong>{formatPercent(data?.distance_pct, 3)}</strong></div>
+      {data?.rolling && (data.rolling.samples ?? 0) > 0 && (
+        <div className="signal-summary-line"><span>Samples ({data.rolling.window}s)</span><strong>{data.rolling.samples}</strong></div>
+      )}
+      <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+        <SidePanel label="UP" side={data?.up} rolling_key="up" rolling={data?.rolling} />
+        <SidePanel label="DOWN" side={data?.down} rolling_key="down" rolling={data?.rolling} />
       </div>
-      <div className="signal-summary-line">
-        <span>Market</span>
-        <strong>{formatProbability(focusSide?.buy_price)}</strong>
-      </div>
-      <div className="signal-summary-line">
-        <span>Edge</span>
-        <strong>{formatEdgePoints(focusSide?.edge)}</strong>
-      </div>
-      <div className="signal-summary-line">
-        <span>Move</span>
-        <strong>{formatPercent(data?.distance_pct, 3)}</strong>
-      </div>
-      <div className="signal-summary-line">
-        <span>Time left</span>
-        <strong>{asNumber(data?.seconds_left)?.toFixed(1) ?? "--"}s</strong>
-      </div>
-      <div className="signal-summary-line">
-        <span>Status</span>
-        <strong className={focusSide?.eligible ? "signal-side-good" : "signal-side-warn"}>
-          {focusSide?.eligible ? "Eligible" : "Watching"}
-        </strong>
-      </div>
-      <p className="muted">{asText(data?.reason) || "No evaluation yet"}</p>
-      <div className="signal-check-list">
-        <CheckRow label="Model" ok={focusSide?.checks?.model_probability_ok} />
-        <CheckRow label="Market" ok={focusSide?.checks?.market_probability_ok} />
-        <CheckRow label="Edge" ok={focusSide?.checks?.edge_ok} />
-        <CheckRow label="Spread" ok={focusSide?.checks?.spread_ok} />
-      </div>
+      <p className="muted" style={{ marginTop: 6 }}>{asText(data?.reason) || "No evaluation yet"}</p>
     </div>
   );
 }
@@ -416,12 +425,6 @@ export function BotDashboard({
     asText(latestEvaluation?.asset) ||
     (evaluationEntries.length > 0 ? evaluationEntries[0][0] : "");
   const focusAsset = (latestEvaluation?.assets || {})[focusAssetKey];
-  const focusSide =
-    focusAsset?.side === "down"
-      ? focusAsset.down
-      : focusAsset?.side === "up"
-        ? focusAsset.up
-        : undefined;
   const latestSignal = [...events].reverse().find((event) => event.kind === "bot2_signal") as
     | (BotEvent & { data: Bot2SignalData })
     | undefined;
@@ -589,12 +592,9 @@ export function BotDashboard({
                 {latestEvaluation?.decision === "eligible" ? "Entry Ready" : "Watching"}
               </div>
               <p className="muted">{liveDecisionSummary(latestEvaluation)}</p>
-              <div className="signal-check-list">
-                <CheckRow label="Model threshold" ok={focusSide?.checks?.model_probability_ok} />
-                <CheckRow label="Market threshold" ok={focusSide?.checks?.market_probability_ok} />
-                <CheckRow label="Edge threshold" ok={focusSide?.checks?.edge_ok} />
-                <CheckRow label="Spread threshold" ok={focusSide?.checks?.spread_ok} />
-              </div>
+              {focusAsset?.forced_side && (
+                <p className="muted" style={{ fontWeight: "bold" }}>Certainty active: forcing {focusAsset.forced_side.toUpperCase()}</p>
+              )}
             </div>
             {supportedAssets.map((asset) => (
               <AssetEvaluationCard key={asset} asset={asset} data={(latestEvaluation?.assets || {})[asset]} />
@@ -652,6 +652,30 @@ export function BotDashboard({
               <div className="signal-summary-line">
                 <span>Min market</span>
                 <strong>{formatProbability(latestEvaluation?.min_market_probability)}</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Ignore edge</span>
+                <strong>{latestEvaluation?.ignore_edge_filter ? "ON" : "OFF"}</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Certainty Time</span>
+                <strong>{asNumber(latestEvaluation?.certainty_seconds_threshold) ?? "--"}s</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Certainty Avg</span>
+                <strong>{formatProbability(latestEvaluation?.certainty_avg_threshold)}</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Rolling Window</span>
+                <strong>{asNumber(latestEvaluation?.rolling_window_seconds) ?? "--"}s</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Live start</span>
+                <strong>{asNumber(latestEvaluation?.live_monitor_start_seconds) ?? "--"}s</strong>
+              </div>
+              <div className="signal-summary-line">
+                <span>Order start</span>
+                <strong>{asNumber(latestEvaluation?.entry_start_seconds) ?? "--"}s</strong>
               </div>
               <div className="signal-summary-line">
                 <span>Min edge</span>
@@ -825,7 +849,8 @@ export function BotDashboard({
               />
             )}
             <NumberField label="Max Odds" value={settings.max_odds} onChange={(v) => updateSetting("max_odds", v)} step={0.001} />
-            <NumberField label="Entry Start Seconds" value={settings.entry_start_seconds} onChange={(v) => updateSetting("entry_start_seconds", Math.round(v))} />
+            <NumberField label="Order Start Seconds" value={settings.entry_start_seconds} onChange={(v) => updateSetting("entry_start_seconds", Math.round(v))} />
+            <NumberField label="Live Monitor Start Seconds" value={settings.live_monitor_start_seconds} onChange={(v) => updateSetting("live_monitor_start_seconds", Math.round(v))} />
             <NumberField label="Entry Check Interval" value={settings.entry_check_interval_seconds} onChange={(v) => updateSetting("entry_check_interval_seconds", v)} step={0.1} />
             <NumberField label="Fast Check Interval" value={settings.entry_check_interval_fast_seconds} onChange={(v) => updateSetting("entry_check_interval_fast_seconds", v)} step={0.1} />
             <NumberField label="Fast Threshold Seconds" value={settings.entry_check_interval_fast_threshold_seconds} onChange={(v) => updateSetting("entry_check_interval_fast_threshold_seconds", Math.round(v))} />
@@ -901,6 +926,22 @@ export function BotDashboard({
                 <NumberField label="Fair Value Aggressive Edge" value={settings.fair_value_aggressive_edge} onChange={(v) => updateSetting("fair_value_aggressive_edge", v)} step={0.001} />
                 <NumberField label="Min Model Probability (0-1 or %)" value={settings.fair_value_min_model_probability} onChange={(v) => updateSetting("fair_value_min_model_probability", v)} step={0.01} />
                 <NumberField label="Min Market Probability (0-1 or %)" value={settings.fair_value_min_market_probability} onChange={(v) => updateSetting("fair_value_min_market_probability", v)} step={0.01} />
+                <div className="setting-item">
+                  <label>Ignore Edge Filter</label>
+                  <div className="setting-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings.ignore_edge_filter)}
+                        onChange={(e) => updateSetting("ignore_edge_filter", e.target.checked)}
+                      />{" "}
+                      Enabled
+                    </label>
+                  </div>
+                </div>
+                <NumberField label="Certainty Seconds Threshold" value={settings.certainty_seconds_threshold} onChange={(v) => updateSetting("certainty_seconds_threshold", Math.round(v))} step={1} />
+                <NumberField label="Certainty Avg Threshold (0-1)" value={settings.certainty_avg_threshold} onChange={(v) => updateSetting("certainty_avg_threshold", v)} step={0.01} />
+                <NumberField label="Rolling Window Seconds" value={settings.rolling_window_seconds} onChange={(v) => updateSetting("rolling_window_seconds", Math.round(v))} step={1} />
               </>
             )}
 

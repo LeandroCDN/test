@@ -19,6 +19,7 @@ class Bot2Settings(BaseModel):
     enabled_assets: list[str] = Field(default_factory=lambda: list(cfg.ENABLED_ASSETS))
 
     entry_start_seconds: int = cfg.ENTRY_START_SECONDS
+    live_monitor_start_seconds: int = cfg.LIVE_MONITOR_START_SECONDS
     entry_check_interval_seconds: float = cfg.ENTRY_CHECK_INTERVAL_SECONDS
     entry_check_interval_fast_seconds: float = cfg.ENTRY_CHECK_INTERVAL_FAST_SECONDS
     entry_check_interval_fast_threshold_seconds: int = cfg.ENTRY_CHECK_INTERVAL_FAST_THRESHOLD_SECONDS
@@ -72,6 +73,10 @@ class Bot2Settings(BaseModel):
     fair_value_aggressive_edge: float = cfg.FAIR_VALUE_AGGRESSIVE_EDGE
     fair_value_min_model_probability: float = cfg.FAIR_VALUE_MIN_MODEL_PROBABILITY
     fair_value_min_market_probability: float = cfg.FAIR_VALUE_MIN_MARKET_PROBABILITY
+    ignore_edge_filter: bool = cfg.IGNORE_EDGE_FILTER
+    certainty_seconds_threshold: int = cfg.CERTAINTY_SECONDS_THRESHOLD
+    certainty_avg_threshold: float = cfg.CERTAINTY_AVG_THRESHOLD
+    rolling_window_seconds: int = cfg.ROLLING_WINDOW_SECONDS
 
     @field_validator("enabled_assets")
     @classmethod
@@ -121,6 +126,14 @@ class Bot2Settings(BaseModel):
             raise ValueError("entry_limit_phase_ratio must be between 0 and 1")
         return value
 
+    @field_validator("entry_start_seconds", "live_monitor_start_seconds", "certainty_seconds_threshold", "rolling_window_seconds")
+    @classmethod
+    def _validate_positive_int(cls, value: int) -> int:
+        value = int(value)
+        if value <= 0:
+            raise ValueError("Value must be > 0")
+        return value
+
     @field_validator(
         "volatility_low_threshold",
         "volatility_high_threshold",
@@ -132,6 +145,7 @@ class Bot2Settings(BaseModel):
         "fair_value_max_spread",
         "fair_value_requote_threshold",
         "fair_value_aggressive_edge",
+        "certainty_avg_threshold",
     )
     @classmethod
     def _validate_non_negative(cls, value: float) -> float:
@@ -190,6 +204,9 @@ def load_settings() -> dict[str, Any]:
     if legacy_min_probability is not None:
         raw.setdefault("fair_value_min_model_probability", legacy_min_probability)
         raw.setdefault("fair_value_min_market_probability", legacy_min_probability)
+    legacy_cert = raw.pop("certainty_probability_threshold", None)
+    if legacy_cert is not None:
+        raw.setdefault("certainty_avg_threshold", legacy_cert)
     merged.update(raw)
     validated = Bot2Settings.model_validate(merged)
     return validated.model_dump()
